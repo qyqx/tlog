@@ -46,6 +46,7 @@ libtlog_la_LIBADD = $(JSON_LIBS) $(LIBCURL)
 
 libtlog_test_la_SOURCES = \
     test_misc.c             \
+    test_sink.c             \
     test_stream_enc.c
 
 libtlog_test_la_LIBADD = libtlog.la
