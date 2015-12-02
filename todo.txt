@@ -77,3 +77,11 @@ Consider renaming "timing" to "meta".
 Implement a test for decoding what was encoded.
 
 Make each message start with window size.
+
+Consider using milliseconds since epoch as the "pos" value.
+
+Consider making separate record types for skipping input/output characters and
+for reading input/output bytes. This should make the implementation simpler.
+
+Refactor transaction backup/restore to use single function and define it using
+macros.

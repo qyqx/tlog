@@ -24,6 +24,65 @@
 #include <stdio.h>
 #include <tlog/chunk.h>
 
+/**
+ * Advance meta time.
+ *
+ * @param dispatcher    The dispatcher to advance time for.
+ * @param ts            The time to advance to, must be equal or greater than
+ *                      the previously advanced to.
+ *
+ * @return True if there was space to record the advanced time, false
+ *         otherwise.
+ */
+static bool
+tlog_chunk_dispatcher_advance(struct tlog_dispatcher *dispatcher,
+                              const struct timespec *ts)
+{
+    struct tlog_chunk *chunk = TLOG_CONTAINER_OF(dispatcher,
+                                                 struct tlog_chunk,
+                                                 dispatcher);
+    assert(tlog_chunk_is_valid(chunk));
+}
+
+/**
+ * Reserve space
+ *
+ * @param dispatcher    The dispatcher to reserve the space from.
+ * @param len           The amount of space to reserve.
+ *
+ * @return True if there was enough space, false otherwise.
+ */
+static bool
+tlog_chunk_dispatcher_reserve(struct tlog_dispatcher *dispatcher, size_t len)
+{
+    struct tlog_chunk *chunk = TLOG_CONTAINER_OF(dispatcher,
+                                                 struct tlog_chunk,
+                                                 dispatcher);
+    assert(tlog_chunk_is_valid(chunk));
+    if (len > chunk->rem)
+        return false;
+    chunk->rem -= len;
+    return true;
+}
+
+/**
+ * Print a record into the reserved space in the meta buffer.
+ *
+ * @param dispatcher    The dispatcher to print to.
+ * @param fmt           Format string to print with.
+ * @param ...           Format arguments to print with.
+ */
+static void
+tlog_chunk_dispatcher_printf(struct tlog_dispatcher   *dispatcher,
+                             const char               *fmt,
+                             ...)
+{
+    struct tlog_chunk *chunk = TLOG_CONTAINER_OF(dispatcher,
+                                                 struct tlog_chunk,
+                                                 dispatcher);
+    assert(tlog_chunk_is_valid(chunk));
+}
+
 tlog_grc
 tlog_chunk_init(struct tlog_chunk *chunk, size_t size)
 {
@@ -37,18 +96,15 @@ tlog_chunk_init(struct tlog_chunk *chunk, size_t size)
     chunk->size = size;
     chunk->rem = size;
 
+    grc = tlog_meta_init(&chunk->meta, size);
+    if (grc != TLOG_RC_OK)
+        goto error;
     grc = tlog_stream_init(&chunk->input, size, '<', '[');
     if (grc != TLOG_RC_OK)
         goto error;
     grc = tlog_stream_init(&chunk->output, size, '>', ']');
     if (grc != TLOG_RC_OK)
         goto error;
-    chunk->timing_buf = malloc(size);
-    if (chunk->timing_buf == NULL) {
-        grc = TLOG_GRC_ERRNO;
-        goto error;
-    }
-    chunk->timing_ptr = chunk->timing_buf;
 
     assert(tlog_chunk_is_valid(chunk));
     return TLOG_RC_OK;
@@ -63,13 +119,11 @@ tlog_chunk_is_valid(const struct tlog_chunk *chunk)
 {
     return chunk != NULL &&
            chunk->size >= TLOG_CHUNK_SIZE_MIN &&
+           tlog_meta_is_valid(&chunk->meta) &&
            tlog_stream_is_valid(&chunk->input) &&
            tlog_stream_is_valid(&chunk->output) &&
-           chunk->timing_buf != NULL &&
-           chunk->timing_ptr >= chunk->timing_buf &&
-           chunk->timing_ptr <= chunk->timing_buf + chunk->size &&
            chunk->rem <= chunk->size &&
-           ((chunk->timing_ptr - chunk->timing_buf) +
+           ((chunk->meta.ptr - chunk->meta.buf) +
             chunk->input.txt_len + chunk->input.bin_len +
             chunk->output.txt_len + chunk->output.bin_len) <=
                 (chunk->size - chunk->rem);
@@ -90,66 +144,13 @@ tlog_chunk_is_empty(const struct tlog_chunk *chunk)
     return chunk->rem >= chunk->size;
 }
 
-/**
- * Record a new timestamp into an I/O, flush streams and add a delay record,
- * if necessary.
- *
- * @param chunk        The I/O to record timestamp into.
- * @param timestmp  The timestamp to record.
- *
- * @return True if timestamp fit, false otherwise.
- */
-static bool
-tlog_chunk_timestamp(struct tlog_chunk *chunk,
-                     const struct timespec *timestamp)
-{
-    struct timespec delay;
-    long sec;
-    long msec;
-    char delay_buf[32];
-    int delay_rc;
-
-    assert(tlog_chunk_is_valid(chunk));
-    assert(timestamp != NULL);
-
-    /* If this is the first write */
-    if (tlog_chunk_is_empty(chunk) && !tlog_chunk_is_pending(chunk)) {
-        chunk->first = *timestamp;
-        delay_rc = 0;
-    } else {
-        tlog_timespec_sub(timestamp, &chunk->last, &delay);
-        sec = (long)delay.tv_sec;
-        msec = delay.tv_nsec / 1000000;
-        if (sec != 0) {
-            delay_rc = snprintf(delay_buf, sizeof(delay_buf),
-                                "+%ld%03ld", sec, msec);
-        } else if (msec != 0) {
-            delay_rc = snprintf(delay_buf, sizeof(delay_buf),
-                                "+%ld", msec);
-        } else {
-            delay_rc = 0;
-        }
-    }
-    if (delay_rc < 0 || (size_t)delay_rc >= sizeof(delay_buf)) {
-        assert(false);
-        return false;
-    }
-    chunk->last = *timestamp;
-
-    /* If we need to add a delay record */
-    if (delay_rc > 0) {
-        /* If it doesn't fit */
-        if ((size_t)delay_rc > chunk->rem)
-            return false;
-        tlog_stream_flush(&chunk->input, &chunk->timing_ptr);
-        tlog_stream_flush(&chunk->output, &chunk->timing_ptr);
-        memcpy(chunk->timing_ptr, delay_buf, (size_t)delay_rc);
-        chunk->timing_ptr += delay_rc;
-        chunk->rem -= delay_rc;
-    }
-
-    return true;
-}
+/** A packet write status */
+enum tlog_chunk_write_status {
+    TLOG_CHUNK_WRITE_STATUS_IGNORED = -1,   /**< Write was ignored completely */
+    TLOG_CHUNK_WRITE_STATUS_VOID,           /**< Write didn't fit at all */
+    TLOG_CHUNK_WRITE_STATUS_INCOMPLETE,     /**< Write was incomplete */
+    TLOG_CHUNK_WRITE_STATUS_COMPLETED,      /**< Write completed */
+};
 
 /**
  * Write a window packet payload to a chunk.
@@ -160,15 +161,17 @@ tlog_chunk_timestamp(struct tlog_chunk *chunk,
  *                  at (set to 0 on first write) / location for (opaque)
  *                  position in the packet the write ended at.
  *
- * @return True if the whole of the (remaining) packet fit into the chunk.
+ * @return Packet write status.
  */
-static bool
+static enum tlog_chunk_write_status
 tlog_chunk_write_window(struct tlog_chunk *chunk,
                         const struct tlog_pkt *pkt,
                         size_t *ppos)
 {
+    unsigned short int width;
+    unsigned short int height;
     /* Window string buffer (max: "=65535x65535") */
-    char buf[16];
+    uint8_t buf[16];
     int rc;
     size_t len;
 
@@ -178,34 +181,45 @@ tlog_chunk_write_window(struct tlog_chunk *chunk,
     assert(ppos != NULL);
     assert(*ppos <= 1);
 
+    /* If there's nothing left to write */
     if (*ppos >= 1)
-        return true;
+        return false;
 
-    rc = snprintf(buf, sizeof(buf), "=%hux%hu",
-                  pkt->data.window.width, pkt->data.window.height);
+    width = pkt->data.window.width;
+    height = pkt->data.window.height;
+
+    /* If window size is the same */
+    if (chunk->got_window) {
+        if (width == chunk->last_width && height == chunk->last_height)
+            return TLOG_CHUNK_WRITE_STATUS_IGNORED;
+    }
+
+    rc = snprintf((char *)buf, sizeof(buf), "=%hux%hu", width, height);
     if (rc < 0) {
         assert(false);
-        return false;
+        return TLOG_CHUNK_WRITE_STATUS_VOID;
     }
 
     len = (size_t)rc;
     if (len >= sizeof(buf)) {
         assert(false);
-        return false;
+        return TLOG_CHUNK_WRITE_STATUS_VOID;
     }
 
     if (len > chunk->rem)
-        return false;
+        return TLOG_CHUNK_WRITE_STATUS_VOID;
 
-    tlog_stream_flush(&chunk->input, &chunk->timing_ptr);
-    tlog_stream_flush(&chunk->output, &chunk->timing_ptr);
+    tlog_stream_flush(&chunk->input, &chunk->meta);
+    tlog_stream_flush(&chunk->output, &chunk->meta);
 
-    memcpy(chunk->timing_ptr, buf, len);
-    chunk->timing_ptr += len;
     chunk->rem -= len;
+    tlog_meta_write(&chunk->meta, buf, len);
 
+    chunk->got_window = true;
+    chunk->last_width = width;
+    chunk->last_height = height;
     *ppos = 1;
-    return true;
+    return TLOG_CHUNK_WRITE_STATUS_COMPLETED;
 }
 
 /**
@@ -217,15 +231,16 @@ tlog_chunk_write_window(struct tlog_chunk *chunk,
  *                  at (set to 0 on first write) / location for (opaque)
  *                  position in the packet the write ended at.
  *
- * @return True if the whole of the (remaining) packet fit into the chunk.
+ * @return Packet write status.
  */
-static bool
+static enum tlog_chunk_write_status
 tlog_chunk_write_io(struct tlog_chunk *chunk,
                     const struct tlog_pkt *pkt,
                     size_t *ppos)
 {
     const uint8_t *buf;
     size_t len;
+    size_t written;
 
     assert(tlog_chunk_is_valid(chunk));
     assert(tlog_pkt_is_valid(pkt));
@@ -233,17 +248,22 @@ tlog_chunk_write_io(struct tlog_chunk *chunk,
     assert(ppos != NULL);
     assert(*ppos <= pkt->data.io.len);
 
+    /* If there's nothing left to write */
     if (*ppos >= pkt->data.io.len)
-        return true;
+        return TLOG_CHUNK_WRITE_STATUS_IGNORED;
 
     buf = pkt->data.io.buf + *ppos;
     len = pkt->data.io.len - *ppos;
-    *ppos += tlog_stream_write(pkt->data.io.output
+    written = tlog_stream_write(pkt->data.io.output
                                     ? &chunk->output
                                     : &chunk->input,
-                               &buf, &len,
-                               &chunk->timing_ptr, &chunk->rem);
-    return len == 0;
+                                &buf, &len,
+                                &chunk->meta, &chunk->rem);
+    *ppos += written;
+
+    return len == 0 ? TLOG_CHUNK_WRITE_STATUS_COMPLETED
+                    : (written != 0 ? TLOG_CHUNK_WRITE_STATUS_INCOMPLETE
+                                    : TLOG_CHUNK_WRITE_STATUS_VOID);
 }
 
 bool
@@ -253,8 +273,7 @@ tlog_chunk_write(struct tlog_chunk *chunk,
 {
     tlog_trx trx = TLOG_TRX_INIT;
     TLOG_TRX_STORE_DECL(tlog_chunk);
-    size_t pos;
-    bool complete;
+    enum tlog_chunk_write_status status;
 
     assert(tlog_chunk_is_valid(chunk));
     assert(tlog_pkt_is_valid(pkt));
@@ -263,46 +282,45 @@ tlog_chunk_write(struct tlog_chunk *chunk,
 
     TLOG_TRX_BEGIN(&trx, tlog_chunk, chunk);
 
-    /* Record the timestamp (if it's new) */
-    if (!tlog_chunk_timestamp(chunk, &pkt->timestamp)) {
+    /* Record the timestamp, if the delay fits */
+    if (!tlog_meta_set(&chunk->meta, &pkt->timestamp, &chunk->rem)) {
         TLOG_TRX_ABORT(&trx, tlog_chunk, chunk);
         return false;
     }
 
     /* Write (a part of) the packet */
-    pos = *ppos;
     switch (pkt->type) {
         case TLOG_PKT_TYPE_IO:
-            complete = tlog_chunk_write_io(chunk, pkt, &pos);
+            status = tlog_chunk_write_io(chunk, pkt, ppos);
             break;
         case TLOG_PKT_TYPE_WINDOW:
-            complete = tlog_chunk_write_window(chunk, pkt, &pos);
+            status = tlog_chunk_write_window(chunk, pkt, ppos);
             break;
         default:
             assert(false);
-            complete = false;
+            status = TLOG_CHUNK_WRITE_STATUS_VOID;
             break;
     }
-    assert(pos >= *ppos);
 
-    /* If no part of the packet fits */
-    if (!complete && pos == *ppos) {
+    /* If something was written */
+    if (status >= TLOG_CHUNK_WRITE_STATUS_INCOMPLETE) {
+        /* Accept all writes */
+        TLOG_TRX_COMMIT(&trx);
+        return status == TLOG_CHUNK_WRITE_STATUS_COMPLETED;
+    } else {
         /* Revert the possible timestamp writing */
         TLOG_TRX_ABORT(&trx, tlog_chunk, chunk);
-        return false;
+        /* Report "ignored" as "completed" */
+        return status == TLOG_CHUNK_WRITE_STATUS_IGNORED;
     }
-
-    TLOG_TRX_COMMIT(&trx);
-    *ppos = pos;
-    return complete;
 }
 
 void
 tlog_chunk_flush(struct tlog_chunk *chunk)
 {
     assert(tlog_chunk_is_valid(chunk));
-    tlog_stream_flush(&chunk->input, &chunk->timing_ptr);
-    tlog_stream_flush(&chunk->output, &chunk->timing_ptr);
+    tlog_stream_flush(&chunk->input, &chunk->meta);
+    tlog_stream_flush(&chunk->output, &chunk->meta);
 }
 
 bool
@@ -316,8 +334,8 @@ tlog_chunk_cut(struct tlog_chunk *chunk)
     TLOG_TRX_BEGIN(&trx, tlog_chunk, chunk);
 
     /* Cut the streams */
-    if (!tlog_stream_cut(&chunk->input, &chunk->timing_ptr, &chunk->rem) ||
-        !tlog_stream_cut(&chunk->output, &chunk->timing_ptr, &chunk->rem)) {
+    if (!tlog_stream_cut(&chunk->input, &chunk->meta, &chunk->rem) ||
+        !tlog_stream_cut(&chunk->output, &chunk->meta, &chunk->rem)) {
         TLOG_TRX_ABORT(&trx, tlog_chunk, chunk);
         return false;
     }
@@ -331,11 +349,10 @@ tlog_chunk_empty(struct tlog_chunk *chunk)
 {
     assert(tlog_chunk_is_valid(chunk));
     chunk->rem = chunk->size;
-    chunk->timing_ptr = chunk->timing_buf;
+    tlog_meta_empty(&chunk->meta);
     tlog_stream_empty(&chunk->input);
     tlog_stream_empty(&chunk->output);
-    tlog_timespec_zero(&chunk->first);
-    tlog_timespec_zero(&chunk->last);
+    chunk->got_window = false;
     assert(tlog_chunk_is_valid(chunk));
 }
 
@@ -343,8 +360,7 @@ void
 tlog_chunk_cleanup(struct tlog_chunk *chunk)
 {
     assert(chunk != NULL);
+    tlog_meta_cleanup(&chunk->meta);
     tlog_stream_cleanup(&chunk->input);
     tlog_stream_cleanup(&chunk->output);
-    free(chunk->timing_buf);
-    chunk->timing_buf = NULL;
 }

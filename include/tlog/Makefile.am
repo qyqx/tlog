@@ -20,13 +20,17 @@
 tlogdir = $(includedir)/tlog
 
 tlog_HEADERS = \
+    channel.h       \
     chunk.h         \
+    dispatcher.h    \
     es_reader.h     \
     fd_reader.h     \
     fd_writer.h     \
+    fork.h          \
     grc.h           \
     mem_reader.h    \
     mem_writer.h    \
+    meta.h          \
     misc.h          \
     msg.h           \
     pkt.h           \

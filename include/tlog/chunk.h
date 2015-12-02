@@ -30,6 +30,8 @@
 #include <tlog/trx.h>
 #include <tlog/misc.h>
 #include <tlog/pkt.h>
+#include <tlog/dispatcher.h>
+#include <tlog/channel.h>
 #include <tlog/stream.h>
 
 /** Minimum value of chunk size */
@@ -37,65 +39,53 @@
 
 /** Chunk buffer */
 struct tlog_chunk {
+    struct tlog_dispatcher  dispatcher; /**< Dispatcher interface */
+
     size_t              size;       /**< Maximum total data length and
                                          size of each buffer below */
     size_t              rem;        /**< Remaining total buffer space */
 
-    uint8_t            *timing_buf; /**< Timing buffer */
-    uint8_t            *timing_ptr; /**< Timing output pointer */
-
-    struct tlog_stream  input;      /**< Input stream state and buffer */
-    struct tlog_stream  output;     /**< Output stream state and buffer */
+    uint8_t            *meta_buf;   /**< Meta buffer */
+    uint8_t            *meta_ptr;   /**< Meta writing position */
 
     struct timespec     first;      /**< First write timestamp */
     struct timespec     last;       /**< Last write timestamp */
+
+    bool                written;    /**< Got a record written */
+
+    struct tlog_channel     input;  /**< Input channel */
+    struct tlog_channel     output; /**< Output channel */
+    struct tlog_stream      input;  /**< Input stream state and buffer */
+    struct tlog_stream      output; /**< Output stream state and buffer */
+
+    bool                got_window;     /**< A window was written before */
+    unsigned short int  last_width;     /**< Last window width */
+    unsigned short int  last_height;    /**< Last window height */
 };
 
 /** Chunk transaction store */
-struct tlog_chunk_trx_store {
+TLOG_TRX_STORE_SIG(tlog_chunk) {
     size_t              rem;        /**< Remaining total buffer space */
-    uint8_t            *timing_ptr; /**< Timing output pointer */
-    struct timespec     first;      /**< First write timestamp */
-    struct timespec     last;       /**< Last write timestamp */
 
-    struct tlog_stream_trx_store    input;  /**< Input store */
-    struct tlog_stream_trx_store    output; /**< Output store */
+    TLOG_TRX_STORE_SIG(tlog_meta)   meta;   /**< Metadata store */
+    TLOG_TRX_STORE_SIG(tlog_stream) input;  /**< Input store */
+    TLOG_TRX_STORE_SIG(tlog_stream) output; /**< Output store */
+
+    bool                got_window;     /**< A window was written before */
+    unsigned short int  last_width;     /**< Last window width */
+    unsigned short int  last_height;    /**< Last window height */
 };
 
-/**
- * Make a transaction backup of a chunk.
- *
- * @param store     Transaction store to backup to.
- * @param object    Chunk object to backup.
- */
-static inline void
-tlog_chunk_trx_backup(struct tlog_chunk_trx_store *store,
-                      struct tlog_chunk *object)
+/** Transfer transaction data of a chunk */
+static inline TLOG_TRX_XFR_SIG(tlog_chunk)
 {
-    store->rem          = object->rem;
-    store->timing_ptr   = object->timing_ptr;
-    store->first        = object->first;
-    store->last         = object->last;
-    tlog_stream_trx_backup(&store->input, &object->input);
-    tlog_stream_trx_backup(&store->output, &object->output);
-}
-
-/**
- * Restore a chunk from a transaction backup.
- *
- * @param store     Transaction store to restore from.
- * @param object    Chunk object to restore.
- */
-static inline void
-tlog_chunk_trx_restore(struct tlog_chunk_trx_store *store,
-                       struct tlog_chunk *object)
-{
-    object->rem          = store->rem;
-    object->timing_ptr   = store->timing_ptr;
-    object->first        = store->first;
-    object->last         = store->last;
-    tlog_stream_trx_restore(&store->input, &object->input);
-    tlog_stream_trx_restore(&store->output, &object->output);
+    TLOG_TRX_XFR_VAR(rem);
+    TLOG_TRX_XFR_OBJ(meta);
+    TLOG_TRX_XFR_OBJ(input);
+    TLOG_TRX_XFR_OBJ(output);
+    TLOG_TRX_XFR_VAR(got_window);
+    TLOG_TRX_XFR_VAR(last_width);
+    TLOG_TRX_XFR_VAR(last_height);
 }
 
 /**

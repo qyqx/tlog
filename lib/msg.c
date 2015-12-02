@@ -178,7 +178,7 @@ tlog_msg_read(struct tlog_msg *msg, struct tlog_pkt *pkt,
          * Read next timing record if the current one is spent
          */
         if (msg->rem == 0) {
-            char            type_buf[2];
+            char            char_buf[2];
             char            type;
             int             read;
             size_t          first_val;
@@ -210,17 +210,16 @@ tlog_msg_read(struct tlog_msg *msg, struct tlog_pkt *pkt,
             }
 
             if (sscanf(timing_ptr, "%1[][><+=]%zu%n",
-                       type_buf, &first_val, &read) < 2)
+                       char_buf, &first_val, &read) < 2)
                 return TLOG_RC_MSG_FIELD_INVALID_VALUE;
-            type = *type_buf;
+            type = *char_buf;
             timing_ptr += read;
 
-            if (type == '[' || type == ']') {
-                if (sscanf(timing_ptr, "/%zu%n", &second_val, &read) < 1)
+            if (type == '[' || type == ']' || type == '=') {
+                if (sscanf(timing_ptr, "%1[/xX]%zu%n",
+                           char_buf, &second_val, &read) < 1)
                     return TLOG_RC_MSG_FIELD_INVALID_VALUE;
-                timing_ptr += read;
-            } else if (type == '=') {
-                if (sscanf(timing_ptr, "x%zu%n", &second_val, &read) < 1)
+                if ((type == '[' || type == ']') && *char_buf != '/')
                     return TLOG_RC_MSG_FIELD_INVALID_VALUE;
                 timing_ptr += read;
             } else {

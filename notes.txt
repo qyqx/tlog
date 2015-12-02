@@ -448,3 +448,52 @@ search your messages and then add 'OR something that matches a bunch of
 relevant audit messages' to the query, and the playback visualisation would
 filter them out by sessionid and time ranges. That's ugly. Do we have
 alternatives? I think it is time to actually try making a visualisation.
+
+Currently partial characters written with a delay produce extra delay records
+in timing. This happens because chunk assumes that every write results in a
+timing record, whereas partial character writes don't produce them.
+
+The solution might be to not write any delay record until an actual attempt to
+write a timing record occurs. That means that instead of writing a delay
+record before each first arriving packet, we need to reserve space for the
+future record and write it later.
+
+We need to review how the timing should actually happen:
+
+We need to write timing *before* any actual stream write or new window size
+that happened at least one millisecond from the last.
+
+What if we had a separate object/module called "timing" that dealt with
+writing delays and other records appropriately? And also dealt with
+reserving the space for the future delay records?
+
+We have to decide how to manage rollbacks in the general case.
+
+A rollback is necessary to maintain consistency.
+
+An object only stores itself and contained objects in a transaction.  It's not
+a business of the object to store any objects that don't belong to it. OTOH,
+it is leaving outside objects inconsistent regarding its own state.  So, if an
+object wants to keep its own and other state consistent, it should preserve
+the outside objects as well.
+
+The problem with this is that outside objects might have already been saved
+for this transaction upstack and we'd better avoid doing extra copies.
+
+There can be many (sub-)transactions happening on the same object.
+
+Or can we simply assume that a transaction will have all the necessary objects
+included upstack and just care about ones we directly own?  OTOH, then why do
+we even care passing a transaction state around if all saving/restoring should
+be done in a single stack frame?
+
+Or shall we perhaps not worry about copies and just do them anyway?  However,
+that should be done in a sub-transaction.  Shall we get rid of transaction IDs
+then?  Otherwise we would need to maintain a knowledge of which objects were
+backed up and which weren't.
+
+Perhaps we can limit the number of active transactions and have a bitmap in
+each object saying which transaction has it preserved?
+
+For now we can just assume all backup/restore is happening in a single place
+and preserve transaction state as a future feature.

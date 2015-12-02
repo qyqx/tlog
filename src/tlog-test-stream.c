@@ -99,12 +99,12 @@ test(const char *n, const struct test t)
 {
     bool passed = true;
     tlog_grc grc;
-    uint8_t meta_buf[SIZE] = {0,};
+    struct tlog_meta meta;
     struct tlog_stream stream;
     const uint8_t *buf;
     size_t len;
-    uint8_t *meta_last = meta_buf;
-    uint8_t *meta_next = meta_buf;
+    uint8_t *meta_last;
+    uint8_t *meta_next;
     size_t rem_last;
     size_t rem_next;
     const struct op *op;
@@ -112,6 +112,14 @@ test(const char *n, const struct test t)
     assert(t.rem_in <= SIZE);
 
     rem_next = rem_last = t.rem_in;
+
+    grc = tlog_meta_init(&meta, SIZE);
+    if (grc != TLOG_RC_OK) {
+        fprintf(stderr, "Failed initializing the meta: %s\n",
+                tlog_grc_strerror(grc));
+        exit(1);
+    }
+    meta_last = meta_next = meta.ptr;
 
     grc = tlog_stream_init(&stream, SIZE, '<', '[');
     if (grc != TLOG_RC_OK) {
@@ -139,7 +147,8 @@ test(const char *n, const struct test t)
             assert(op->data.write.len_out <= op->data.write.len_in);
             buf = op->data.write.buf;
             len = op->data.write.len_in;
-            tlog_stream_write(&stream, &buf, &len, &meta_next, &rem_next);
+            tlog_stream_write(&stream, &buf, &len, &meta, &rem_next);
+            meta_next = meta.ptr;
             if ((buf < op->data.write.buf) ||
                 (buf - op->data.write.buf) !=
                     (ssize_t)(op->data.write.len_in -
@@ -163,7 +172,8 @@ test(const char *n, const struct test t)
             else
                 goto cleanup;
         case OP_TYPE_FLUSH:
-            tlog_stream_flush(&stream, &meta_next);
+            tlog_stream_flush(&stream, &meta);
+            meta_next = meta.ptr;
             if ((meta_next - meta_last) != op->data.flush.meta_off)
                 FAIL_OP("meta_off %zd != %zd",
                         (meta_next - meta_last),
@@ -174,7 +184,8 @@ test(const char *n, const struct test t)
             else
                 goto cleanup;
         case OP_TYPE_CUT:
-            tlog_stream_cut(&stream, &meta_next, &rem_next);
+            tlog_stream_cut(&stream, &meta, &rem_next);
+            meta_next = meta.ptr;
             if ((meta_next - meta_last) != op->data.cut.meta_off)
                 FAIL_OP("meta_off %zd != %zd",
                         (meta_next - meta_last), op->data.cut.meta_off);
@@ -202,24 +213,24 @@ test(const char *n, const struct test t)
 
     if (rem_last != t.rem_out)
         FAIL("rem %zu != %zu", rem_last, t.rem_out);
-    if (stream.txt_len != t.txt_len)
-        FAIL("txt_len %zu != %zu", stream.txt_len, t.txt_len);
-    if (stream.bin_len != t.bin_len)
-        FAIL("bin_len %zu != %zu", stream.bin_len, t.bin_len);
-    if ((meta_last - meta_buf) != (ssize_t)t.meta_len)
-        FAIL("meta_len %zd != %zu", (meta_last - meta_buf), t.meta_len);
 
-#define BUF_CMP(_n, _r, _e) \
-    do {                                                        \
-        if (memcmp(_r, _e, SIZE) != 0) {                        \
-            fprintf(stderr, "%s: " #_n "_buf mismatch:\n", n);  \
-            tlog_test_diff(stderr, _r, SIZE, _e, SIZE);         \
-            passed = false;                                     \
-        }                                                       \
+#define BUF_CMP(_name, \
+                _result_ptr, _result_len, _expected_ptr, _expected_len) \
+    do {                                                                \
+        if ((_result_len) != (_expected_len) ||                         \
+            memcmp(_result_ptr, _expected_ptr, _expected_len) != 0) {   \
+            fprintf(stderr, "%s: " #_name "_buf mismatch:\n", n);       \
+            tlog_test_diff(stderr,                                      \
+                           _result_ptr, _result_len,                    \
+                           _expected_ptr, _expected_len);               \
+            passed = false;                                             \
+        }                                                               \
     } while (0)
-    BUF_CMP(txt, stream.txt_buf, t.txt_buf);
-    BUF_CMP(bin, stream.bin_buf, t.bin_buf);
-    BUF_CMP(meta, meta_buf, t.meta_buf);
+    BUF_CMP(txt, stream.txt_buf, stream.txt_len, t.txt_buf, t.txt_len);
+    BUF_CMP(bin, stream.bin_buf, stream.bin_len, t.bin_buf, t.bin_len);
+    BUF_CMP(meta,
+            meta.buf, (size_t)(meta.ptr - meta.buf),
+            t.meta_buf, t.meta_len);
 #undef BUF_CMP
 
 #undef FAIL

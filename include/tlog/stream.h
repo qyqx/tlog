@@ -26,96 +26,52 @@
 #include <tlog/grc.h>
 #include <tlog/utf8.h>
 #include <tlog/trx.h>
+#include <tlog/channel.h>
 
 #define TLOG_STREAM_SIZE_MIN    32
 
 /** I/O stream */
 struct tlog_stream {
-    size_t              size;           /**< Text/binary encoded buffer size */
+    struct tlog_channel    *channel;    /**< Channel */
 
-    struct tlog_utf8    utf8;           /**< UTF-8 filter */
+    size_t                  size;       /**< Text/binary encoded buffer size */
 
-    uint8_t             valid_mark;     /**< Valid text record marker */
-    uint8_t             invalid_mark;   /**< Invalid text record marker */
+    struct tlog_utf8        utf8;       /**< UTF-8 filter */
 
-    uint8_t            *txt_buf;        /**< Encoded text buffer */
-    size_t              txt_run;        /**< Text input run in characters */
-    size_t              txt_dig;        /**< Text output run digit limit */
-    size_t              txt_len;        /**< Text output length in bytes */
+    uint8_t                *txt_buf;    /**< Encoded text buffer */
+    size_t                  txt_len;    /**< Text output length in bytes */
 
-    uint8_t            *bin_buf;        /**< Encoded binary buffer */
-    size_t              bin_run;        /**< Binary input run in bytes */
-    size_t              bin_dig;        /**< Binary output run digit limit */
-    size_t              bin_len;        /**< Binary output length in bytes */
+    uint8_t                *bin_buf;    /**< Encoded binary buffer */
+    size_t                  bin_len;    /**< Binary output length in bytes */
 };
 
 /** Stream transaction store */
-struct tlog_stream_trx_store {
+TLOG_TRX_STORE_SIG(tlog_stream) {
     struct tlog_utf8    utf8;           /**< UTF-8 filter */
-
-    size_t              txt_run;        /**< Text input run in characters */
-    size_t              txt_dig;        /**< Text output run digit limit */
     size_t              txt_len;        /**< Text output length in bytes */
-
-    size_t              bin_run;        /**< Binary input run in bytes */
-    size_t              bin_dig;        /**< Binary output run digit limit */
     size_t              bin_len;        /**< Binary output length in bytes */
 };
 
-/**
- * Make a transaction backup of a stream.
- *
- * @param store     Transaction store to backup to.
- * @param object    Stream object to backup.
- */
-static inline void
-tlog_stream_trx_backup(struct tlog_stream_trx_store *store,
-                       struct tlog_stream *object)
+/** Transfer transaction data of a stream */
+static inline TLOG_TRX_XFR_SIG(tlog_stream)
 {
-    store->utf8     = object->utf8;
-
-    store->txt_run  = object->txt_run;
-    store->txt_dig  = object->txt_dig;
-    store->txt_len  = object->txt_len;
-
-    store->bin_run  = object->bin_run;
-    store->bin_dig  = object->bin_dig;
-    store->bin_len  = object->bin_len;
-}
-
-/**
- * Restore a stream from a transaction backup.
- *
- * @param store     Transaction store to restore from.
- * @param object    Stream object to restore.
- */
-static inline void
-tlog_stream_trx_restore(struct tlog_stream_trx_store *store,
-                        struct tlog_stream *object)
-{
-    object->utf8    = store->utf8;
-
-    object->txt_run = store->txt_run;
-    object->txt_dig = store->txt_dig;
-    object->txt_len = store->txt_len;
-
-    object->bin_run = store->bin_run;
-    object->bin_dig = store->bin_dig;
-    object->bin_len = store->bin_len;
+    TLOG_TRX_XFR_VAR(utf8);
+    TLOG_TRX_XFR_VAR(txt_len);
+    TLOG_TRX_XFR_VAR(bin_len);
 }
 
 /**
  * Initialize a stream.
  *
- * @param stream        The stream to initialize.
- * @param size          Text/binary buffer size.
- * @param valid_mark    Valid UTF-8 record marker character.
- * @param invalid_mark  Invalid UTF-8 record marker character.
+ * @param stream    The stream to initialize.
+ * @param channel   Channel to use.
+ * @param size      Text/binary buffer size.
  *
  * @return Global return code.
  */
-extern tlog_grc tlog_stream_init(struct tlog_stream *stream, size_t size,
-                                 uint8_t valid_mark, uint8_t invalid_mark);
+extern tlog_grc tlog_stream_init(struct tlog_stream *stream,
+                                 struct tlog_channel *channel,
+                                 size_t size);
 
 /**
  * Check if a stream is valid.
@@ -151,40 +107,34 @@ extern bool tlog_stream_is_empty(const struct tlog_stream *stream);
  * space.
  *
  * @param stream    The stream to write to.
+ * @param ts        The write timestamp.
  * @param pbuf      Location of/for the pointer to the data to write.
  * @param plen      Location of/for the length of the data to write.
- * @param pmeta     Location of/for the meta data output pointer.
- * @param prem      Location of/for the total remaining output space.
  *
  * @return Number of input bytes written.
  */
 extern size_t tlog_stream_write(struct tlog_stream *stream,
-                                const uint8_t **pbuf, size_t *plen,
-                                uint8_t **pmeta,
-                                size_t *prem);
+                                const struct timespec *ts,
+                                const uint8_t **pbuf, size_t *plen);
 
 /**
  * Flush a stream - write metadata record to reserved space and reset runs.
  *
  * @param stream    The stream to flush.
- * @param pmeta     Location of/for the metadata output pointer.
  */
-extern void tlog_stream_flush(struct tlog_stream *stream,
-                              uint8_t **pmeta);
+extern void tlog_stream_flush(struct tlog_stream *stream);
 
 /**
  * Cut a stream - write pending incomplete character to the buffers.
  *
  * @param stream    The stream to cut.
- * @param pmeta     Location of/for the meta data output pointer.
- * @param prem      Location of/for the total remaining output space.
+ * @param ts        The cut timestamp.
  *
  * @return True if incomplete character fit into the remaining space, false
  *         otherwise.
  */
 extern bool tlog_stream_cut(struct tlog_stream *stream,
-                            uint8_t **pmeta,
-                            size_t *prem);
+                            const struct timespec *ts);
 
 /**
  * Empty buffers of a stream, but not pending incomplete characters.
